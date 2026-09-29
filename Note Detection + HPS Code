@@ -1,0 +1,166 @@
+clear all; close all; clc;
+
+%% Zach's Code
+[y, Fs] = audioread("11_notes.mp3");
+% sound(y,Fs);
+
+if size(y, 2) > 1
+    y = mean(y, 2);   
+end
+
+% Apply the low-pass filter
+cutoffFreq = 400;
+y = lowpass(y, cutoffFreq, Fs);
+
+windowLength = 512;
+overlap = round(0.8*windowLength);
+nfft = 8124;
+window = hann(windowLength);
+
+%% Calculate STFT
+[S, F, T] = stft(y, Fs, 'Window', window, 'OverlapLength', overlap, 'FFTLength', nfft);
+P = abs(S);
+P_dB = 20*log10(P + eps);
+
+%% Plot spectrogram
+figure;
+imagesc(T, F, P_dB); axis xy;
+xlabel('Time (s)'); ylabel('Frequency (Hz)'); title('STFT Spectrogram');
+colorbar; ylabel(colorbar, 'Magnitude (dB)'); colormap jet;
+ylim([0 1000]);
+clim([max(P_dB(:))-60 max(P_dB(:))]);
+
+% Calculate energy in each STFT time frame
+energy_dB = 10*log10(sum(P.^2, 1) + eps);
+energy_smooth = movmean(energy_dB, 3);
+
+figure;
+plot(T, energy_smooth, 'LineWidth', 1.5); grid on;
+xlabel('Time (s)'); ylabel('Energy (dB)'); title('Energy vs Time');
+
+%% Computes the Harmonic Product Spectrum (Basically a Harmonic filter but without the 60Hz of a power system)
+Pmag_dB = P_dB;
+R = 5;
+HPS_dB = Pmag_dB;
+for t = 1:size(Pmag_dB,2)
+    h = Pmag_dB(:,t);
+    for r = 2:R
+        decimated = Pmag_dB(1:r:end, t);
+        h(1:length(decimated)) = h(1:length(decimated)) + decimated;
+    end
+    HPS_dB(:,t) = h;
+end
+
+fMask = F >= 80 & F <= 1000;
+[~, idx] = max(HPS_dB(fMask,:), [], 1);
+Fsub = F(fMask);
+f0_raw = Fsub(idx);
+
+%% Calculates the loudest and testes aganist active threshold set
+activeThreshold = max(energy_dB) - 30;
+isActive = energy_dB > activeThreshold;
+f0_raw(~isActive) = NaN;
+f0_clean = movmedian(f0_raw, 3, 'omitnan');
+
+%% On or off set calculation
+onsetIdx  = find(diff([0 isActive]) == 1);
+offsetIdx = find(diff([isActive 0]) == -1);
+
+% Energy can flicker below threshold, meaning it would fuck up (These are in seconds btw)
+minNoteGap = 0.02;   
+minSegDuration = 0.03;   
+
+mergedOnsets  = onsetIdx(1);
+mergedOffsets = [];
+for k = 2:length(onsetIdx)
+    if T(onsetIdx(k)) - T(offsetIdx(k-1)) < minNoteGap
+        continue;
+    end
+    mergedOffsets(end+1) = offsetIdx(k-1); 
+    mergedOnsets(end+1)  = onsetIdx(k);   
+end
+mergedOffsets(end+1) = offsetIdx(end);
+
+keep = (T(mergedOffsets) - T(mergedOnsets)) >= minSegDuration;
+mergedOnsets  = mergedOnsets(keep);
+mergedOffsets = mergedOffsets(keep);
+
+%% Actual fundemental Frequency calculation code
+noteStart = T(mergedOnsets);
+noteEnd   = T(mergedOffsets);
+noteFreq_autoc = nan(1, length(mergedOnsets));
+noteFreq_HPS   = nan(1, length(mergedOnsets));
+
+autocFmin = 80; autocFmax = 1200;   
+
+%Formatting bullshit
+fprintf('\n=== Detected Notes ===\n');
+fprintf('#  | Start (s) | End (s) | Duration (s) | Autocorr (Hz) | HPS (Hz)\n');
+for i = 1:length(mergedOnsets)
+    idxRange = mergedOnsets(i):mergedOffsets(i);
+
+    freqsInSeg = f0_clean(idxRange);
+    freqsInSeg = freqsInSeg(~isnan(freqsInSeg));
+    if ~isempty(freqsInSeg)
+        noteFreq_HPS(i) = octaveCorrectHPS(median(freqsInSeg), HPS_dB, F, idxRange);
+    end
+
+    margin = min(0.15*(noteEnd(i)-noteStart(i)), 0.015);   % trim attack transient
+    sIdx = max(1, round((noteStart(i)+margin)*Fs));
+    eIdx = min(length(y), round((noteEnd(i)-margin)*Fs));
+    if eIdx > sIdx
+        noteFreq_autoc(i) = autocorrPitch(y(sIdx:eIdx), Fs, autocFmin, autocFmax);
+    end
+
+    fprintf('%-3d| %8.2f  | %6.2f  | %6.2f       | %11.2f   | %7.2f\n', ...
+        i, noteStart(i), noteEnd(i), noteEnd(i)-noteStart(i), ...
+        noteFreq_autoc(i), noteFreq_HPS(i));
+end
+fprintf('\nTotal notes detected: %d\n', length(mergedOnsets));
+
+%% Figure 3 Plot
+figure; hold on;
+for i = 1:length(mergedOnsets)
+    if isnan(noteFreq_autoc(i)), continue; end
+    plot([noteStart(i) noteEnd(i)], [noteFreq_autoc(i) noteFreq_autoc(i)], 'LineWidth', 3);
+end
+xlabel('Time (s)'); ylabel('Fundamental Frequency (Hz)');
+title('Detected Fundamental Frequency per Note');
+grid on;
+
+function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
+    % Estimates fundamental frequency from the raw audio segment using auto
+    % correlation. Uses lags and delays to see which waveform matches the
+    % copy the best
+    ySeg = double(ySeg(:)) - mean(ySeg);
+    ySeg = ySeg .* hann(length(ySeg));
+
+    r = xcorr(ySeg, 'coeff');
+    r = r(ceil(length(r)/2):end);   
+
+    lagMin = max(2, round(Fs/fMax));
+    lagMax = min(length(r)-1, round(Fs/fMin));
+    if lagMax <= lagMin
+        f0 = NaN; return;
+    end
+
+    [~, relIdx] = max(r(lagMin:lagMax));
+    f0 = Fs / (lagMin + relIdx - 1);
+end
+
+function f0_corrected = octaveCorrectHPS(f, HPS_dB, F, idxRange)
+    % Compares f, f/2, f/3, f/4 as candidate fundamentals
+    if isnan(f)
+        f0_corrected = NaN; return;
+    end
+    candidates = [f, f/2, f/3, f/4];
+    scores = nan(size(candidates));
+    for c = 1:length(candidates)
+        if candidates(c) <= 0, continue; end
+        [~, idxC] = min(abs(F - candidates(c)));
+        scores(c) = mean(HPS_dB(idxC, idxRange));
+    end
+    tolerance_dB = 3;
+    viable = find(scores >= max(scores) - tolerance_dB);
+    f0_corrected = candidates(min(viable));
+end
