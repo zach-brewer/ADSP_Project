@@ -1,53 +1,85 @@
 clear all; close all; clc;
 
 %% Zach's Code
-[y, Fs] = audioread("11_notes.mp3");
-% sound(y,Fs);
+
+[y, Fs] = audioread("let_down.mp3");
+sound(y,Fs);
 
 if size(y, 2) > 1
     y = mean(y, 2);   
-end
+end 
 
+% Zurin: Removed the 400 Hz low-pass filter so  there are higher fundamentals and harmonics are preserved for HPS and pitch detection.
 % Apply the low-pass filter
-cutoffFreq = 400;
-y = lowpass(y, cutoffFreq, Fs);
+% cutoffFreq = 400;
+% y = lowpass(y, cutoffFreq, Fs);
 
-windowLength = 512;
+
+% Zurin: Increased window length from 512 to 4096 samples to improve
+% frequency resolution. I didn't really think about time resolution but we
+% can talk about that
+windowLength = 4096;
+
 overlap = round(0.8*windowLength);
 nfft = 8124;
 window = hann(windowLength);
 
+
 %% Calculate STFT
-[S, F, T] = stft(y, Fs, 'Window', window, 'OverlapLength', overlap, 'FFTLength', nfft);
+
+% Zurin: Added 'FrequencyRange','onesided' since we only want postivie
+[S, F, T] = stft(y, Fs, ...
+    'Window', window, ...
+    'OverlapLength', overlap, ...
+    'FFTLength', nfft, ...
+    'FrequencyRange','onesided');
+
 P = abs(S);
 P_dB = 20*log10(P + eps);
+
 
 %% Plot spectrogram
 figure;
 imagesc(T, F, P_dB); axis xy;
-xlabel('Time (s)'); ylabel('Frequency (Hz)'); title('STFT Spectrogram');
-colorbar; ylabel(colorbar, 'Magnitude (dB)'); colormap jet;
+xlabel('Time (s)');
+ylabel('Frequency (Hz)');
+title('STFT Spectrogram');
+colorbar;
+ylabel(colorbar, 'Magnitude (dB)');
+colormap jet;
 ylim([0 1000]);
 clim([max(P_dB(:))-60 max(P_dB(:))]);
+
 
 % Calculate energy in each STFT time frame
 energy_dB = 10*log10(sum(P.^2, 1) + eps);
 energy_smooth = movmean(energy_dB, 3);
 
 figure;
-plot(T, energy_smooth, 'LineWidth', 1.5); grid on;
-xlabel('Time (s)'); ylabel('Energy (dB)'); title('Energy vs Time');
+plot(T, energy_smooth, 'LineWidth', 1.5);
+grid on;
+xlabel('Time (s)');
+ylabel('Energy (dB)');
+title('Energy vs Time');
 
-%% Computes the Harmonic Product Spectrum (Basically a Harmonic filter but without the 60Hz of a power system)
+
+%% Computes the Harmonic Product Spectrum
+% Basically a harmonic filter but without the 60 Hz of a power system.
+% This portion is unchanged from the original code.
+
 Pmag_dB = P_dB;
 R = 5;
 HPS_dB = Pmag_dB;
+
 for t = 1:size(Pmag_dB,2)
     h = Pmag_dB(:,t);
+
     for r = 2:R
         decimated = Pmag_dB(1:r:end, t);
-        h(1:length(decimated)) = h(1:length(decimated)) + decimated;
+        h(1:length(decimated)) = ...
+            h(1:length(decimated)) + decimated;
     end
+
     HPS_dB(:,t) = h;
 end
 
@@ -56,111 +88,353 @@ fMask = F >= 80 & F <= 1000;
 Fsub = F(fMask);
 f0_raw = Fsub(idx);
 
-%% Calculates the loudest and testes aganist active threshold set
-activeThreshold = max(energy_dB) - 30;
+
+%% Calculates the loudest and tests against active threshold set
+
+% Zurin: Threshold changed from max - 30 dB to max - 60 dB.
+% Now spectral flux detects the note attacks, so this energy threshold only
+% needs to distinguish meaningful sound from silence.
+activeThreshold = max(energy_dB) - 60;
+
 isActive = energy_dB > activeThreshold;
 f0_raw(~isActive) = NaN;
-f0_clean = movmedian(f0_raw, 3, 'omitnan');
+
+
+% Zurin: Removed the 3-frame moving median from f0_raw to debug, we cna
+% switch back
+% f0_clean = movmedian(f0_raw, 3, 'omitnan');
+f0_clean = f0_raw;
+
+
+%% Zurin: Spectral Flux Note-Onset Detection
+% The original code detected note starts and stops using changes in the
+% energy threshold. That did not work well when one note decayed into the
+% next because the energy might never fall below the threshold.
+%
+% Spectral flux instead detects sudden changes in the frequency spectrum,
+% which usually occur when a new note is attacked.
+
+
+% Zurin: Normalize each STFT frame
+Pnorm = P ./ (sum(P,1) + eps);
+
+
+% Zurin: Find the change in normalized spectral magnitude
+spectralDiff = diff(Pnorm, 1, 2);
+
+
+% Zurin: Only keep increases in frequency magnitude.
+spectralDiff(spectralDiff < 0) = 0;
+spectralFlux = [0 sum(spectralDiff.^2, 1)];
+% Zurin: Smooth the flux to reduce noise
+spectralFlux_smooth = movmean(spectralFlux, 3);
+
+fluxThreshold = median(spectralFlux_smooth) + ...
+                1*std(spectralFlux_smooth);
+
+% Zurin: Find trhe peaks
+
+% Zurin: Minimum time allowed between detected notes
+minOnsetGap = 0.2;
+
+[~, fluxOnsets] = findpeaks( ...
+    spectralFlux_smooth, ...
+    'MinPeakHeight', fluxThreshold, ...
+    'MinPeakDistance', round(minOnsetGap/(T(2)-T(1))));
+
+
+%% Zurin: Plot spectral flux to verify detected note playing
+
+figure;
+plot(T, spectralFlux_smooth, 'LineWidth', 1.5);
+hold on;
+
+yline(fluxThreshold, '--', 'Threshold');
+
+plot(T(fluxOnsets), ...
+    spectralFlux_smooth(fluxOnsets), ...
+    'ro', ...
+    'MarkerSize', 8);
+
+xlabel('Time (s)');
+ylabel('Spectral Flux');
+title('Spectral Flux Note Onset Detection');
+grid on;
+
 
 %% On or off set calculation
-onsetIdx  = find(diff([0 isActive]) == 1);
-offsetIdx = find(diff([isActive 0]) == -1);
 
-% Energy can flicker below threshold, meaning it would fuck up (These are in seconds btw)
-minNoteGap = 0.02;   
-minSegDuration = 0.03;   
+% Zurin: This entire old energy-based segmentation method was removed
+% because I wanted to make sure that previous note decay wasn't messing
+% with the detection of future notes. Feel free to bring it back if you
+% want.
 
-mergedOnsets  = onsetIdx(1);
-mergedOffsets = [];
-for k = 2:length(onsetIdx)
-    if T(onsetIdx(k)) - T(offsetIdx(k-1)) < minNoteGap
-        continue;
-    end
-    mergedOffsets(end+1) = offsetIdx(k-1); 
-    mergedOnsets(end+1)  = onsetIdx(k);   
-end
-mergedOffsets(end+1) = offsetIdx(end);
+% onsetIdx  = find(diff([0 isActive]) == 1);
+% offsetIdx = find(diff([isActive 0]) == -1);
 
-keep = (T(mergedOffsets) - T(mergedOnsets)) >= minSegDuration;
-mergedOnsets  = mergedOnsets(keep);
-mergedOffsets = mergedOffsets(keep);
+% minNoteGap = 0.02;
+% minSegDuration = 0.03;
 
-%% Actual fundemental Frequency calculation code
+% mergedOnsets  = onsetIdx(1);
+% mergedOffsets = [];
+
+% for k = 2:length(onsetIdx)
+%     if T(onsetIdx(k)) - T(offsetIdx(k-1)) < minNoteGap
+%         continue;
+%     end
+%
+%     mergedOffsets(end+1) = offsetIdx(k-1);
+%     mergedOnsets(end+1)  = onsetIdx(k);
+% end
+%
+% mergedOffsets(end+1) = offsetIdx(end);
+
+% keep = (T(mergedOffsets) - T(mergedOnsets)) >= minSegDuration;
+% mergedOnsets  = mergedOnsets(keep);
+% mergedOffsets = mergedOffsets(keep);
+
+
+%
+% I set this up arbitrarily not sure what value we should actually use
+lastActive = find(energy_dB > -100, 1, 'last');
+
+
+% Zurin: Every spectral-flux onset is looked at as a new note
+mergedOnsets = fluxOnsets(:)';
+
+% Zurin: Each note ends right before the next note starts.
+% Three STFT frames are also removed before the next onset to reduce leakage 
+mergedOffsets = [mergedOnsets(2:end) - 3, lastActive];
+
+
+%% Actual fundamental frequency calculation code
+
 noteStart = T(mergedOnsets);
 noteEnd   = T(mergedOffsets);
+
 noteFreq_autoc = nan(1, length(mergedOnsets));
 noteFreq_HPS   = nan(1, length(mergedOnsets));
 
-autocFmin = 80; autocFmax = 1200;   
+autocFmin = 80;
+autocFmax = 1200;
 
-%Formatting bullshit
+
+% Formatting bullshit
 fprintf('\n=== Detected Notes ===\n');
 fprintf('#  | Start (s) | End (s) | Duration (s) | Autocorr (Hz) | HPS (Hz)\n');
+
+
 for i = 1:length(mergedOnsets)
+
     idxRange = mergedOnsets(i):mergedOffsets(i);
 
-    freqsInSeg = f0_clean(idxRange);
+
+    % Zurin: OLD approach used HPS estimates from the entire detected
+    % note. Which was leading to a lot of smearing issues
+    % freqsInSeg = f0_clean(idxRange);
+    %
+    % Instead of estimating pitch from the entire note, only analyze the
+    % relatively stable portion from approximately 100 ms to 500 ms after
+    % the detected note being played
+
+    maxHPSduration = 0.5;       % seconds
+
+    hpsStartTime = noteStart(i) + 0.10;
+
+    hpsEndTime = min(noteStart(i) + maxHPSduration, noteEnd(i));
+
+    hpsFrames = find(T >= hpsStartTime & T <= hpsEndTime);
+
+    freqsInSeg = f0_clean(hpsFrames);
+
     freqsInSeg = freqsInSeg(~isnan(freqsInSeg));
+
+
+    % Zurin: Removed the duplicate HPS assignment
+    %
+    % Octave correction now uses the SAME hpsFrames region that produced
+    % the median frequency estimate instead of scoring over the entire note.
     if ~isempty(freqsInSeg)
-        noteFreq_HPS(i) = octaveCorrectHPS(median(freqsInSeg), HPS_dB, F, idxRange);
+
+        noteFreq_HPS(i) = octaveCorrectHPS( ...
+            median(freqsInSeg), ...
+            HPS_dB, ...
+            F, ...
+            hpsFrames);
     end
 
-    margin = min(0.15*(noteEnd(i)-noteStart(i)), 0.015);   % trim attack transient
-    sIdx = max(1, round((noteStart(i)+margin)*Fs));
-    eIdx = min(length(y), round((noteEnd(i)-margin)*Fs));
+    % Zurin: OLD autocorrelation method trimmed a maximum of only about
+    % 15 ms from each side of the entire note.
+    %
+    % margin = min(0.15*(noteEnd(i)-noteStart(i)), 0.015);
+    % sIdx = max(1, round((noteStart(i)+margin)*Fs));
+    % eIdx = min(length(y), round((noteEnd(i)-margin)*Fs));
+
+
+    % Like HPS, autocorrelation now analyzes approximately 100-500 ms after
+    % each onset so it sees the stable periodic part of the note instead of
+    % consideirng the attack of the note
+    analysisStart = noteStart(i) + 0.100;
+    analysisEnd   = min(noteStart(i) + 0.500, noteEnd(i));
+
+    % Zurin: Convert the selected stable analysis times into audio sample
+    % indices for autocorrelation.
+    sIdx = max(1, round(analysisStart * Fs));
+    eIdx = min(length(y), round(analysisEnd * Fs));
+
+
     if eIdx > sIdx
-        noteFreq_autoc(i) = autocorrPitch(y(sIdx:eIdx), Fs, autocFmin, autocFmax);
+
+        noteFreq_autoc(i) = autocorrPitch( ...
+            y(sIdx:eIdx), ...
+            Fs, ...
+            autocFmin, ...
+            autocFmax);
     end
+
 
     fprintf('%-3d| %8.2f  | %6.2f  | %6.2f       | %11.2f   | %7.2f\n', ...
         i, noteStart(i), noteEnd(i), noteEnd(i)-noteStart(i), ...
         noteFreq_autoc(i), noteFreq_HPS(i));
 end
+
 fprintf('\nTotal notes detected: %d\n', length(mergedOnsets));
 
+
 %% Figure 3 Plot
-figure; hold on;
+
+figure;
+hold on;
+
 for i = 1:length(mergedOnsets)
-    if isnan(noteFreq_autoc(i)), continue; end
-    plot([noteStart(i) noteEnd(i)], [noteFreq_autoc(i) noteFreq_autoc(i)], 'LineWidth', 3);
+
+    if isnan(noteFreq_autoc(i))
+        continue;
+    end
+
+    plot( ...
+        [noteStart(i) noteEnd(i)], ...
+        [noteFreq_autoc(i) noteFreq_autoc(i)], ...
+        'LineWidth', 3);
 end
-xlabel('Time (s)'); ylabel('Fundamental Frequency (Hz)');
+
+xlabel('Time (s)');
+ylabel('Fundamental Frequency (Hz)');
 title('Detected Fundamental Frequency per Note');
 grid on;
 
+
+%% Autocorrelation pitch estimator
+% I didn't change this
+
 function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
-    % Estimates fundamental frequency from the raw audio segment using auto
-    % correlation. Uses lags and delays to see which waveform matches the
-    % copy the best
+
     ySeg = double(ySeg(:)) - mean(ySeg);
     ySeg = ySeg .* hann(length(ySeg));
 
     r = xcorr(ySeg, 'coeff');
-    r = r(ceil(length(r)/2):end);   
+    r = r(ceil(length(r)/2):end);
 
     lagMin = max(2, round(Fs/fMax));
     lagMax = min(length(r)-1, round(Fs/fMin));
+
+
     if lagMax <= lagMin
-        f0 = NaN; return;
+        f0 = NaN;
+        return;
     end
 
     [~, relIdx] = max(r(lagMin:lagMax));
     f0 = Fs / (lagMin + relIdx - 1);
 end
 
+
+%% HPS octave correction
+
 function f0_corrected = octaveCorrectHPS(f, HPS_dB, F, idxRange)
-    % Compares f, f/2, f/3, f/4 as candidate fundamentals
+
+    % Compares f, f/2, f/3, and f/4 as possible fundamental frequencies.
+
     if isnan(f)
-        f0_corrected = NaN; return;
+        f0_corrected = NaN;
+        return;
     end
     candidates = [f, f/2, f/3, f/4];
     scores = nan(size(candidates));
+
     for c = 1:length(candidates)
-        if candidates(c) <= 0, continue; end
+
+        if candidates(c) <= 0
+            continue;
+        end
         [~, idxC] = min(abs(F - candidates(c)));
         scores(c) = mean(HPS_dB(idxC, idxRange));
     end
+
+
     tolerance_dB = 3;
     viable = find(scores >= max(scores) - tolerance_dB);
     f0_corrected = candidates(min(viable));
+end
+
+
+%% % Zurin PURELY TESTING to see if notes are actually detected correctly
+% Zurin:This  is mainly being used to verify whether the estimated frequencies
+% correspond to reasonable musical notes. Our final output should be
+% formatted better
+
+% Note table
+noteNames = {'C','C#','D','D#','E','F','F#','G','G#','A','A#','B'};
+
+
+fprintf('\n=== Note Names ===\n');
+fprintf('#  | Autocorr note | Cents off | HPS note\n');
+
+
+for i = 1:length(mergedOnsets)
+
+    % Zurin: Convert the autocorrelation frequency into the nearest musical
+    % note and calculate its tuning error in cents.
+    [nameA, centsA] = freq2note(noteFreq_autoc(i), noteNames);
+
+
+    % Zurin: Also convert the HPS result into the nearest musical note.
+    [nameH, ~] = freq2note(noteFreq_HPS(i), noteNames);
+
+
+    fprintf('%-3d| %-13s | %+6.0f    | %s\n', ...
+        i, nameA, centsA, nameH);
+end
+
+
+%% Zurin: Frequency-to-note conversion function
+% I grabbed a lot of this code by looking online. It worked so I stopped
+% looking at it
+
+function [name, cents] = freq2note(f, noteNames)
+
+    % Converts a frequency to the nearest musical note and
+    % determines how far the frequency is from that note in cents.
+
+    if isnan(f) || f <= 0
+        name = '--';
+        cents = NaN;
+        return;
+    end
+    
+    % Equation from the MIDI tuning standard:
+    % https://en.wikipedia.org/wiki/MIDI_tuning_standard
+    midi = 69 + 12*log2(f/440);
+
+
+    midiRound = round(midi);
+
+    cents = 100*(midi - midiRound);
+
+    octave = floor(midiRound/12) - 1;
+
+    name = sprintf( ...
+        '%s%d', ...
+        noteNames{mod(midiRound,12)+1}, ...
+        octave);
 end
