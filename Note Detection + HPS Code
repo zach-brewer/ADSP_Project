@@ -379,7 +379,7 @@ end
 
 
 %% % Zurin PURELY TESTING to see if notes are actually detected correctly
-% Zurin:This  is mainly being used to verify whether the estimated frequencies
+% Zurin:This is mainly being used to verify whether the estimated frequencies
 % correspond to reasonable musical notes. Our final output should be
 % formatted better
 
@@ -387,9 +387,10 @@ end
 noteNames = {'C','C#','D','D#','E','F','F#','G','G#','A','A#','B'};
 
 
-fprintf('\n=== Note Names ===\n');
-fprintf('#  | Autocorr note | Cents off | HPS note\n');
-
+fprintf('\n=== Notes of Mapped Frequencies ===\n');
+fprintf('| %-3s | %8s | %8s | %11s | %12s | %-13s | %-7s | %-9s | %-8s |\n', ...
+    '#', 'Start(s)', 'End(s)', 'Duration(s)', 'Autocorr(Hz)', 'Autocorr Note', 'Cents', ...
+    'HPS (Hz)', 'HPS Note');
 
 for i = 1:length(mergedOnsets)
 
@@ -402,39 +403,50 @@ for i = 1:length(mergedOnsets)
     [nameH, ~] = freq2note(noteFreq_HPS(i), noteNames);
 
 
-    fprintf('%-3d| %-13s | %+6.0f    | %s\n', ...
-        i, nameA, centsA, nameH);
+    fprintf('| %-3d | %8.2f | %8.2f | %11.2f | %12.2f | %-13s | %+7.1f | %9.2f | %-8s |\n', ...
+        i, ...
+        noteStart(i), ...
+        noteEnd(i), ...
+        noteEnd(i)-noteStart(i), ...
+        noteFreq_autoc(i), ...
+        nameA, ...
+        centsA, ...
+        noteFreq_HPS(i), ...
+        nameH);
+    % fprintf('%-3d| %-13s | %+6.0f    | %s\n', ...
+        % i, nameA, centsA, nameH);
 end
 
 
-%% Zurin: Frequency-to-note conversion function
-% I grabbed a lot of this code by looking online. It worked so I stopped
-% looking at it
+%% Mackenzie: Updated note sorting algorithm that includes midi verification
 
 function [name, cents] = freq2note(f, noteNames)
+% Convert to the nearest Midi
+% Make sure that the frequency coming in has a value
+if isnan(f) || f <= 0
+    name = 'N/A'
+    cents = NaN;
+    return;
+end
+% Look at where the detected frequency actually lies
+midiExact = 69 + 12*log2(f/440);
+% Find the nearest musical note
+midi = round(midiExact);
 
-    % Converts a frequency to the nearest musical note and
-    % determines how far the frequency is from that note in cents.
+noteIndex = mod(midi, 12);
+octave = floor(midi/12) - 1;
 
-    if isnan(f) || f <= 0
-        name = '--';
-        cents = NaN;
-        return;
-    end
-    
-    % Equation from the MIDI tuning standard:
-    % https://en.wikipedia.org/wiki/MIDI_tuning_standard
-    midi = 69 + 12*log2(f/440);
+% Validate the Midi range for piano
+% Can modify these values based on what instruments we want our project to
+% be valid for, as varies by instrument
+if midi < 0 || midi > 127
+    name = 'Not a valid note.';
+    cents = NaN;
+    return;
+end
 
-
-    midiRound = round(midi);
-
-    cents = 100*(midi - midiRound);
-
-    octave = floor(midiRound/12) - 1;
-
-    name = sprintf( ...
-        '%s%d', ...
-        noteNames{mod(midiRound,12)+1}, ...
-        octave);
+name = sprintf('%s%d', noteNames{noteIndex+1}, octave);
+% Figure out how far the measured frequency of the exact frequency is from
+% the nearest musical note
+cents = 100*(midiExact - midi);
 end
