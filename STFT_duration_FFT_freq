@@ -1,0 +1,183 @@
+clear all; close all; clc;
+
+%% Zach's Code
+noteNames = {'C','C#','D','D#','E','F','F#','G','G#','A','A#','B'};
+[y, Fs] = audioread("test_audio/let_down.mp3");
+%sound(y,Fs);
+
+if size(y, 2) > 1
+    y = mean(y, 2);   
+end 
+
+% Zurin: Removed the 400 Hz low-pass filter so  there are higher fundamentals and harmonics are preserved for HPS and pitch detection.
+% Apply the low-pass filter
+% cutoffFreq = 400;
+% y = lowpass(y, cutoffFreq, Fs);
+
+
+% Zurin: Increased window length from 512 to 4096 samples to improve
+% frequency resolution. I didn't really think about time resolution but we
+% can talk about that
+windowLength = 128;
+
+overlap = round(0.8*windowLength);
+%overlap = 1;
+nfft = 8142;
+window = hann(windowLength);
+
+
+%% Calculate STFT
+
+% Zurin: Added 'FrequencyRange','onesided' since we only want postivie
+[S, F, T] = stft(y, Fs, ...
+    'Window', window, ...
+    'OverlapLength', overlap, ...
+    'FFTLength', nfft, ...
+    'FrequencyRange','onesided');
+
+P = abs(S);
+P_dB = 20*log10(P + eps);
+
+
+%% Plot spectrogram
+figure;
+imagesc(T, F, P_dB); axis xy;
+xlabel('Time (s)');
+ylabel('Frequency (Hz)');
+title('STFT Spectrogram');
+colorbar;
+ylabel(colorbar, 'Magnitude (dB)');
+colormap jet;
+ylim([0 1000]);
+clim([max(P_dB(:))-60 max(P_dB(:))]);
+
+
+% Calculate energy in each STFT time frame
+energy_dB = 10*log10(sum(P.^2, 1) + eps);
+energy_smooth = movmean(energy_dB, 3);
+
+figure;
+plot(T, energy_dB, 'LineWidth', 1.5);
+xlabel('Time (s)');
+ylabel('Energy (dB)');
+title('Energy vs Time');
+hold on;
+
+threshold = 10;
+% Remove very short above-threshold regions
+aboveThreshold = energy_dB > threshold;
+minNoteFrames = 5;
+aboveThreshold = bwareaopen(aboveThreshold, minNoteFrames);
+
+% Fill gaps shorter than this many frames
+gapFrames = 5;
+aboveThreshold = imclose(aboveThreshold, ones(1, gapFrames));
+
+% Find changes between below/above threshold
+changes = diff([false, aboveThreshold, false]);
+
+% Start and end STFT frame indices
+startFrames = find(changes == 1);
+endFrames   = find(changes == -1) - 1;
+
+% Convert STFT frame times to original audio sample indices
+startSamples = round(T(startFrames) * Fs) + 1;
+endSamples   = round(T(endFrames) * Fs) + 1;
+
+% Put them into one array
+noteSamples = [startSamples(:), endSamples(:)];
+
+% get actual note content in audio signal
+notes = cell(size(noteSamples,1), 1);
+for k = 1:size(noteSamples,1)
+    notes{k} = y(noteSamples(k,1):noteSamples(k,2));
+end
+
+figure;
+
+plot((0:length(y)-1)/Fs, y);
+hold on;
+
+for k = 1:size(noteSamples,1)
+    xline(noteSamples(k,1)/Fs, '--', 'Start');
+    xline(noteSamples(k,2)/Fs, '--', 'End');
+
+end
+
+xlabel('Time (s)');
+ylabel('Amplitude');
+title('Detected Notes');
+grid on;
+
+
+
+notes = zeros(size(noteSamples,1));
+for k = 1:size(noteSamples,1)
+    firstNote = y(noteSamples(k,1):noteSamples(k,2));
+    N = length(firstNote);
+    Y = fft(firstNote);
+
+    P2 = abs(Y/N);
+
+    P1 = P2(1:floor(N/2)+1);
+    P1(2:end-1) = 2*P1(2:end-1);
+
+    f = Fs*(0:floor(N/2))/N;
+    figure;
+    plot(f, P1, 'LineWidth', 1.5);
+    xlabel('Frequency (Hz)');
+    ylabel('Magnitude');
+    title('FFT');
+    grid on;
+    xlim([0 4000]);
+    
+    thresholdVal = 0.01;
+
+    %Find peaks above the threshold height
+    [pks, locs] = findpeaks(P1, f, 'MinPeakHeight', thresholdVal);
+    % disp(locs);
+    notes(k) = locs(1);
+    [name, cents] =  freq2note(locs(1), noteNames);
+    disp(name);
+end
+
+
+%% % Zurin PURELY TESTING to see if notes are actually detected correctly
+% Zurin:This is mainly being used to verify whether the estimated frequencies
+% correspond to reasonable musical notes. Our final output should be
+% formatted better
+
+% Note table
+
+
+
+function [name, cents] = freq2note(f, noteNames)
+% Convert to the nearest Midi
+% Make sure that the frequency coming in has a value
+if isnan(f) || f <= 0
+    name = 'N/A'
+    cents = NaN;
+    return;
+end
+% Look at where the detected frequency actually lies
+midiExact = 69 + 12*log2(f/440);
+% Find the nearest musical note
+midi = round(midiExact);
+
+noteIndex = mod(midi, 12);
+octave = floor(midi/12) - 1;
+
+% Validate the Midi range for piano
+% Can modify these values based on what instruments we want our project to
+% be valid for, as varies by instrument
+if midi < 0 || midi > 127
+    name = 'Not a valid note.';
+    cents = NaN;
+    return;
+end
+
+name = sprintf('%s%d', noteNames{noteIndex+1}, octave);
+% Figure out how far the measured frequency of the exact frequency is from
+% the nearest musical note
+cents = 100*(midiExact - midi);
+end
