@@ -1,34 +1,28 @@
-clear all; close all; clc;
+close all;
+%% Parameters
+% Smoothing factor of moving average filter used on energy plot
+smoothing = 10;
 
-%% Zach's Code
-noteNames = {'C','C#','D','D#','E','F','F#','G','G#','A','A#','B'};
-[y, Fs] = audioread("test_audio/let_down.mp3");
-%sound(y,Fs);
 
+% Cutoff threshold in dB for final note end
+drop = 30;
+%% Code
+
+
+[y, Fs] = audioread("test_audio/20_notes.mp3");
+
+% Stretch audio makes the audio sample longer without changing sampling
+% rate requires audio toolbox so not used for now.
+%y = stretchAudio(y, 0.75);
 if size(y, 2) > 1
     y = mean(y, 2);   
 end 
-
-% Zurin: Removed the 400 Hz low-pass filter so  there are higher fundamentals and harmonics are preserved for HPS and pitch detection.
-% Apply the low-pass filter
-% cutoffFreq = 400;
-% y = lowpass(y, cutoffFreq, Fs);
-
-
-% Zurin: Increased window length from 512 to 4096 samples to improve
-% frequency resolution. I didn't really think about time resolution but we
-% can talk about that
-windowLength = 128;
+windowLength = 1024;
 
 overlap = round(0.8*windowLength);
-%overlap = 1;
-nfft = 8142;
+nfft = 8192;
 window = hann(windowLength);
 
-
-%% Calculate STFT
-
-% Zurin: Added 'FrequencyRange','onesided' since we only want postivie
 [S, F, T] = stft(y, Fs, ...
     'Window', window, ...
     'OverlapLength', overlap, ...
@@ -38,120 +32,197 @@ window = hann(windowLength);
 P = abs(S);
 P_dB = 20*log10(P + eps);
 
+plot_spectogram(T, F, P_dB);
+energy_dB = 20*log10(sum(P.^2, 1) + eps);
+energy_smooth = energy_dB;
 
-%% Plot spectrogram
+energy_smooth(energy_smooth < 0) = 0;
+energy_ma = movmean(energy_smooth, smoothing);
 figure;
-imagesc(T, F, P_dB); axis xy;
-xlabel('Time (s)');
-ylabel('Frequency (Hz)');
-title('STFT Spectrogram');
-colorbar;
-ylabel(colorbar, 'Magnitude (dB)');
-colormap jet;
-ylim([0 1000]);
-clim([max(P_dB(:))-60 max(P_dB(:))]);
+plot(T, energy_ma);
 
+[max, min] = find_note_edges(energy_smooth);
+[min, last_note_closed] = close_last_note(max, min, energy_ma, drop);
 
-% Calculate energy in each STFT time frame
-energy_dB = 10*log10(sum(P.^2, 1) + eps);
-energy_smooth = movmean(energy_dB, 3);
-
-figure;
-plot(T, energy_dB, 'LineWidth', 1.5);
+hold on;
+plot(T(max(1,:)), max(2,:), 'ro');
+plot(T(min(1,:)), min(2,:), 'bo');
+grid on;
 xlabel('Time (s)');
 ylabel('Energy (dB)');
-title('Energy vs Time');
-hold on;
-
-threshold = 10;
-% Remove very short above-threshold regions
-aboveThreshold = energy_dB > threshold;
-minNoteFrames = 5;
-aboveThreshold = bwareaopen(aboveThreshold, minNoteFrames);
-
-% Fill gaps shorter than this many frames
-gapFrames = 5;
-aboveThreshold = imclose(aboveThreshold, ones(1, gapFrames));
-
-% Find changes between below/above threshold
-changes = diff([false, aboveThreshold, false]);
-
-% Start and end STFT frame indices
-startFrames = find(changes == 1);
-endFrames   = find(changes == -1) - 1;
-
-% Convert STFT frame times to original audio sample indices
-startSamples = round(T(startFrames) * Fs) + 1;
-endSamples   = round(T(endFrames) * Fs) + 1;
-
-% Put them into one array
-noteSamples = [startSamples(:), endSamples(:)];
-
-% get actual note content in audio signal
-notes = cell(size(noteSamples,1), 1);
-for k = 1:size(noteSamples,1)
-    notes{k} = y(noteSamples(k,1):noteSamples(k,2));
+title('Energy with Local Maxima and Minima');
+hold off;
+num_notes = size(max,2);
+notes = zeros(num_notes);
+if num_notes == 0
+    disp('No notes found.');
 end
+max_time = T(max(1,:));
+min_time = T(min(1,:));
 
-figure;
+max_sample = round(max_time*Fs)+1;
+min_sample = round(min_time*Fs)+1;
 
-plot((0:length(y)-1)/Fs, y);
-hold on;
+for i = 1:num_notes
 
-for k = 1:size(noteSamples,1)
-    xline(noteSamples(k,1)/Fs, '--', 'Start');
-    xline(noteSamples(k,2)/Fs, '--', 'End');
+    freq = find_frequency(max_sample(i), min_sample(i), y, Fs);
+    notes(i) = freq;
 
 end
 
-xlabel('Time (s)');
-ylabel('Amplitude');
-title('Detected Notes');
-grid on;
+function freq = find_frequency(note_start, note_end, signal, Fs)
+    note = signal(note_start: note_end);
+    note = note - mean(note);
+    Y = fft(note);
 
+    N = length(note);
+    P = abs(Y/N);
+    P = P(1:floor(N/2)+1);
+    fft_threshold = 0.1 * max(P);
 
-
-notes = zeros(size(noteSamples,1));
-for k = 1:size(noteSamples,1)
-    firstNote = y(noteSamples(k,1):noteSamples(k,2));
-    N = length(firstNote);
-    Y = fft(firstNote);
-
-    P2 = abs(Y/N);
-
-    P1 = P2(1:floor(N/2)+1);
-    P1(2:end-1) = 2*P1(2:end-1);
-
+    if length(P) > 2
+        P(2:end-1) = 2*P(2:end-1);
+    end
     f = Fs*(0:floor(N/2))/N;
-    figure;
-    plot(f, P1, 'LineWidth', 1.5);
-    xlabel('Frequency (Hz)');
-    ylabel('Magnitude');
-    title('FFT');
-    grid on;
-    xlim([0 4000]);
-    
-    thresholdVal = 0.01;
 
-    %Find peaks above the threshold height
-    [pks, locs] = findpeaks(P1, f, 'MinPeakHeight', thresholdVal);
-    % disp(locs);
-    notes(k) = locs(1);
-    [name, cents] =  freq2note(locs(1), noteNames);
-    disp(name);
+    P(1) = 0;
+    
+    [peak, loc] = findpeaks(P);
+    valid_peaks = find(peak >= fft_threshold);
+    if isempty(valid_peaks)
+        freq = NaN;
+        disp('No peak found');
+    else
+        first_peak = valid_peaks(1);
+        freq = f(loc(first_peak));
+        [name, ~] = freq2note(freq);
+        disp(name);
+    end
 end
 
 
-%% % Zurin PURELY TESTING to see if notes are actually detected correctly
-% Zurin:This is mainly being used to verify whether the estimated frequencies
-% correspond to reasonable musical notes. Our final output should be
-% formatted better
+% finds the note edges
+% looks for local maxes and mins and determines where note edges are
+function [max_fixed, min_fixed] = find_note_edges(x)
+    min_peak_size = 5;
+    smoothWindow = 10;
+    min_distance = 20;
+    xSmooth = movmean(x, smoothWindow);
 
-% Note table
+    % find max vals
+    [max_val_i, max_loc_i, ~, max_prom] = findpeaks(xSmooth, ...
+        'MinPeakProminence',min_peak_size);
+    max_data = [max_loc_i; max_val_i; max_prom];
+
+    % find min vals
+    [min_val_i, min_loc_i, ~, min_prom] = findpeaks(-xSmooth, 'MinPeakProminence',min_peak_size);
+    min_val_i = -min_val_i;
+    min_data = [min_loc_i; min_val_i; min_prom];
+    [max_fixed, min_fixed] = fix_extrema(max_data, min_data, min_distance);
+end
+
+function [max_fixed, min_fixed] = fix_extrema(max, min, min_distance)
+    i = 1;
+    while i < size(max,2)
+        if max(1,i+1) - max(1,i) <= min_distance
+            if max(3,i) >= max(3,i+1)
+                
+                max(:,i+1) = [];
+            else
+                max(:,i) = [];
+                if i > 1
+                    i = i-1;
+                end
+            end
+        else
+            i = i + 1;
+        end    
+    end
+    i = 1;
+    while i < size(min,2)
+        if min(1,i+1) - min(1,i) <= min_distance
+            if min(3,i) >= min(3,i+1)
+                min(:,i+1) = [];
+            else
+                min(:,i) = [];
+
+                if i > 1
+                    i = i-1;
+                end
+            end
+        else
+            i = i + 1;
+        end    
+    end
+    
+    loc = [max(1,:), min(1,:)];
+    val = [max(2,:), min(2,:)];
+    type= [ones(size(max,2),1), -ones(size(max,2),1)];
+    [loc, order] = sort(loc);
+    val = val(order);
+    type = type(order);
+    i = 1;
+
+    while i < length(type)
+        if type(i) == type(i+1)
+            loc(i+1) = [];
+            val(i+1) = [];
+            type(i+1) = [];
+        else
+            i = i+1;
+        end
+    end
+    max_mask = type == 1;
+    min_mask = type == -1;
+    max_index = loc(max_mask);
+    max_val = val(max_mask);
+    min_index = loc(min_mask);
+    min_val = val(min_mask);
+    max_fixed = [max_index; max_val];
+    min_fixed = [min_index; min_val];
+end
+
+% If the last note has no minimum after it, add one at the
+% the last max where the energy has fallen drop below max
+function [min, closed] = close_last_note(max, min, energy, drop)
+    closed = false;
+    if isempty(max) || size(min, 2) >= size(max, 2)
+        return;   % every note already has an end
+    end
+
+    last_idx = max(1, end);
+    cutoff   = max(2, end) - drop;
+    rel = find(energy(last_idx:end) <= cutoff, 1, 'first');
+    if isempty(rel)
+        end_idx = numel(energy);
+    else
+        end_idx = last_idx + rel - 1;
+    end
+
+    min(:, end+1) = [end_idx; energy(end_idx)];
+    closed = true;
+end
+
+% Plots the spectogram of the STFT
+% took it out of the main code for clarity
+function plot_spectogram(T, F, P_dB)
+    figure;
+    imagesc(T, F, P_dB); 
+    axis xy;
+    xlabel('Time (s)');
+    ylabel('Frequency (Hz)');
+    title('STFT Spectrogram');
+    colorbar;
+    ylabel(colorbar, 'Magnitude (dB)');
+    colormap jet;
+    ylim([0 1000]);
+    clim([max(P_dB(:))-60 max(P_dB(:))]);
+end
 
 
+function [name, cents] = freq2note(f)
+noteNames = {'C','C#','D','D#','E','F','F#','G','G#','A','A#','B'};
 
-function [name, cents] = freq2note(f, noteNames)
 % Convert to the nearest Midi
 % Make sure that the frequency coming in has a value
 if isnan(f) || f <= 0
