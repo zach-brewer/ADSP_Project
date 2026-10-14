@@ -312,3 +312,5 @@ end
 %% Print Note Table
 
 printNoteTable(noteStart, noteEnd, noteFreq_autoc);
+
+plotDetectedNotes(noteStart, noteEnd, noteFreq_autoc);
