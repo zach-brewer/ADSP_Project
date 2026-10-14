@@ -203,16 +203,6 @@ mergedOnsets = validOnsets;
 % Three STFT frames are also removed before the next onset to reduce leakage 
 mergedOffsets = [mergedOnsets(2:end) - 3, lastActive];
 
-
-%% Actual fundamental frequency calculation code
-
-noteStart = T(mergedOnsets);
-noteEnd   = T(mergedOffsets);
-
-autocFmin = 80;
-autocFmax = 1200;
-
-
 %% Fundamental Frequency Calculation
 
 noteStart = T(mergedOnsets);
