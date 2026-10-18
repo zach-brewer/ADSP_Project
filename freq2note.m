@@ -1,21 +1,25 @@
 function [name, cents] = freq2note(f, noteNames)
-% Convert to the nearest Midi
-% Make sure that the frequency coming in has a value
+% Convert to the nearest MIDI
+% Check that the detected frequency is valid
 if isnan(f) || f <= 0
     name = 'N/A';
     cents = NaN;
     return;
 end
-% Look at where the detected frequency actually lies
+
+% Convert the detected frequency to its corresponding MIDI value
 midiExact = 69 + 12*log2(f/440);
-% Find the nearest musical note
+% Round to the nearest MIDI note and determine its name and octave
 midi = round(midiExact);
 
+% Note: mod(midi, 12) determines the note's position within 12 note
+% chromatic scale
 noteIndex = mod(midi, 12);
 octave = floor(midi/12) - 1;
 
-% Validate the Midi range for piano
-% Can modify these values based on what instruments we want our project to
+% Reject notes outside of the standard 88-key piano range
+% Note: these values could be modified in the future to accommodate for
+% other instruments, as valid midi ranges vary by instrument
 % be valid for, as varies by instrument
 if midi < 0 || midi > 127
     name = 'Not a valid note.';
@@ -23,8 +27,12 @@ if midi < 0 || midi > 127
     return;
 end
 
+% Combine the musical note name with its octave
 name = sprintf('%s%d', noteNames{noteIndex+1}, octave);
-% Figure out how far the measured frequency of the exact frequency is from
-% the nearest musical note
+
+% Calculate the frequency deviation from the nearest note in cents
+% + cents means detected frequency is sharper/higher than the nearest note
+% - cents means detected frequency is flatter/lower than the nearest note
+% 0 cents means detected frequency perfectly matches note's ideal frequency
 cents = 100*(midiExact - midi);
 end
