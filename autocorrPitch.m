@@ -2,7 +2,7 @@
 % Simply receives audio samples and estimates fundamental frequency -- does
 % not care about when the note starts and ends
 % The principle behind autocorrelation for pitch detection is that if a
-% signal is periodic with period T0, shifting it by T0 should make it line
+% signal is periodic with period (measured in samples (lag)), shifting it by T0 should make it line
 % up with itself again
 function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
     % ySeg = audio samples corresponding to the portion of a note being
@@ -13,7 +13,8 @@ function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
 
     % f0 = the estimated fundamental frequency in Hz
 
-    % Remove DC offset (center waveform around zero and apply Hann window
+    % Remove DC offset by subtracting the mean, then apply a Hann window
+    % to reduce any discontinuities on the edges
     ySeg = double(ySeg(:)) - mean(ySeg);
     ySeg = ySeg .* hann(length(ySeg));
 
@@ -21,12 +22,13 @@ function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
     % Calculate normalized autocorrelation
     r = xcorr(ySeg, 'coeff');
 
-    % Keep only nonnegative lags; discard redundant information
+    % Keep only nonnegative lags (including zero lag); discard redundant
+    % information
     r = r(ceil(length(r)/2):end);
 
     % Allowed lag range based on allowed frequency range
-    lagMin = max(2, round(Fs/fMax));
-    lagMax = min(length(r)-1, round(Fs/fMin));
+    lagMin = max(2, ceil(Fs/fMax));
+    lagMax = min(length(r)-1, floor(Fs/fMin));
 
     if lagMax <= lagMin
         f0 = NaN;
@@ -38,9 +40,9 @@ function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
     % frequency range
     rSearch = r(lagMin:lagMax);
 
-    % Find all local maxima
-    % peakVals = autoCorr values at the maxima peak
-    % peakLocs = store indices within rSearch
+    % Identify local maxima in the autocorrelation sequence
+    % peakVals contains autocorrelation values at each peak
+    % peakLocs contains corresponding indices within rSearch
     [peakVals, peakLocs] = findpeaks(rSearch);
 
     % If no peaks exist, pitch cannot be estimated
@@ -69,9 +71,9 @@ function f0 = autocorrPitch(ySeg, Fs, fMin, fMax)
     % Convert significant peak locations into lag values
     sigLags = lagMin + sigLocs - 1;
 
-    % Estimate the period using the SPACING between peaks rather than
-    % grabbing the first significant peak because it helps us determine the
-    % period of the note more accurately
+    % Estimate the fundamental period from the average spacing between
+    % significant autocorrelation peaks, assuming they represent
+    % consecutive multiples of the fundamental period
     if length(sigLags) >= 2
         chosenLag = mean(diff(sigLags));
     else
